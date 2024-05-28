@@ -1,0 +1,221 @@
+%%time
+from typing import List
+from typing import List, Dict, Optional, Tuple
+import re
+from typing import List, Dict
+import boto3
+import json
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from pathlib import Path
+import boto3
+from langchain.llms import SagemakerEndpoint
+from langchain.embeddings import HuggingFaceInstructEmbeddings
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.embeddings.sagemaker_endpoint import EmbeddingsContentHandler
+from typing import Dict,List
+from langchain_community.embeddings import SagemakerEndpointEmbeddings
+from langchain.llms.sagemaker_endpoint import LLMContentHandler
+from typing import List, Optional, Tuple
+import pickle
+import numpy as np
+from scipy.spatial.distance import cosine
+from sklearn.metrics.pairwise import cosine_similarity
+import io
+import json
+import boto3
+import json
+from typing import Dict, List
+from botocore.config import Config
+from langchain_community.embeddings import SagemakerEndpointEmbeddings
+from langchain_community.embeddings.sagemaker_endpoint import EmbeddingsContentHandler
+from langchain_community.callbacks import StreamlitCallbackHandler
+import base64
+import time
+from langchain.schema.output_parser import StrOutputParser
+import boto3
+from langchain.llms import SagemakerEndpoint
+from langchain.llms.sagemaker_endpoint import LLMContentHandler
+from typing import Dict, List
+import json
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema.runnable import RunnablePassthrough, RunnableLambda
+import time
+from pandas import DataFrame
+import pandas as pd
+
+def generate_statements(question: str, answer: str, model) -> List[str]:
+    prompt = f"""<s>[INST]
+You are an expert in analyzing question-answer pairs and generating concise statements based on the answer. Your task is to respond by identifying the main subject and information in each sentence of the answer and create concise statements for each piece of information without using pronouns. Follow these instructions:
+
+1. Understand the question and answer provided.
+2. Identify the main subject and information in each sentence of the answer.
+3. Create concise statements for each piece of information without using pronouns.
+4. Provide the statements in a numbered list format, with each statement on a new line preceded by a number and a period.
+
+The response must strictly be in the specified format.
+
+For instance, if the question-answer pair is as follows:
+
+Question: What is the capital of France?
+Answer: Paris is the capital of France.
+
+Step 1: Identify the main subject and information in the answer.
+Main subject: Paris
+Information: Paris is the capital of France
+
+Step 2: Create a concise statement that conveys the key information without using pronouns.
+Statements:
+1. Paris is the capital of France.
+
+Question: Who was Albert Einstein?
+Answer: Albert Einstein was a German-born theoretical physicist. He developed the theory of relativity. He is considered one of the most influential scientists of the 20th century.
+
+Step 1: Identify the main subject and information in each sentence of the answer.
+Sentence 1:
+Main subject: Albert Einstein
+Information: Albert Einstein was born in Germany and was a theoretical physicist
+
+Sentence 2:
+Main subject: Albert Einstein
+Information: Albert Einstein developed the theory of relativity
+
+Sentence 3:
+Main subject: Albert Einstein
+Information: Albert Einstein is considered one of the most influential scientists of the 20th century
+
+Step 2: Create concise statements for each piece of information without using pronouns.
+Statements:
+1. Albert Einstein was born in Germany.
+2. Albert Einstein was a theoretical physicist.
+3. Albert Einstein developed the theory of relativity.
+4. Albert Einstein is considered one of the most influential scientists of the 20th century.
+
+Now apply this approach:
+
+Question: {question}
+Answer: {answer}
+[/INST]</s>
+"""
+
+    response = model.invoke(prompt)
+    statements = response.split("\n")
+    print(f"Facts Generated : \n", '\n'.join(list(statements)))
+    return statements
+
+def parse_verdicts(response: str) -> List[int]:
+    verdicts = []
+    lines = response.split("\n")
+    for line in lines:
+        line = line.strip()
+        if line:
+            match = re.search(r'^\d+\.\s*(\d+)', line)
+            if match:
+                verdict = int(match.group(1))
+                if verdict == 1 or verdict == 0:
+                    verdicts.append(verdict)
+                else:
+                    print(f"Warning: Unexpected verdict value: {verdict}")
+            else:
+                print(f"Warning: Unexpected line format: {line}")
+    return verdicts
+
+def score_statements(context: str, statements: List[str], model) -> float:
+    statements_str = "\n".join([f"{i+1}. {st}" for i, st in enumerate(statements)])
+
+    prompt = f"""<s>[INST]
+You are an expert in evaluating the faithfulness of statements based on a given context. Your task is to read the following statements and provide a verdict for each statement as 1 if it can be directly inferred from the context, or 0 if it cannot be directly inferred. Follow these instructions:
+
+1. Read and understand the provided context.
+2. For each statement, determine if it can be directly inferred from the context.
+3. Provide a verdict of 1 if the statement can be directly inferred, or 0 if it cannot be directly inferred.
+4. Provide the verdicts in a numbered list format, with each verdict on a new line preceded by a number and a period.
+
+The response must strictly be in the specified format.
+
+For instance, if the context and statements are as follows:
+
+Context: Paris is the capital and most populous city of France. It is situated on the River Seine, in northern France.
+
+Statements:
+1. Paris is the capital of France.
+2. Paris is located in northern France.
+3. Paris has the highest population in France.
+4. The Eiffel Tower is located in Paris.
+
+Verdicts:
+1. 1
+2. 1
+3. 1
+4. 0
+
+Context: Albert Einstein was a German-born theoretical physicist who developed the theory of relativity, one of the two pillars of modern physics. His work is also known for its influence on the philosophy of science.
+
+Statements:
+1. Albert Einstein developed the theory of relativity.
+2. The theory of relativity is one of the two pillars of modern physics.
+3. Albert Einstein's work influenced the philosophy of science.
+4. Albert Einstein won the Nobel Prize in Physics.
+
+Verdicts:
+1. 1
+2. 1
+3. 1
+4. 0
+
+Now apply this approach:
+
+Context: {context}
+
+Statements:
+{statements_str}
+[/INST]</s>
+"""
+
+    response = model.invoke(prompt)
+    print(f"Facts Check: \n{response}")
+    
+    valid_verdicts = parse_verdicts(response)
+
+    if len(valid_verdicts) != len(statements):
+        print(f"Warning: Mismatch between the number of statements ({len(statements)}) and the number of valid verdicts ({len(valid_verdicts)})")
+        
+    score = 0
+    if valid_verdicts:
+        score = sum(valid_verdicts) / len(valid_verdicts)
+
+    return score
+
+def compute_faithfulness(dataset, model) -> List[float]:
+    scores = []
+
+    for item in dataset:
+        question = item["question"]
+        answer = item["answer"]
+        context = "\n".join(item["contexts"])
+
+        statements = generate_statements(question, answer, model)
+        score = score_statements(context, statements, model)
+        scores.append(score)
+
+    return scores
+
+dataset = [
+    # {
+    #     "question": "What is the currency of Japan?",
+    #     "answer": "The currency of Japan is the Japanese Yen. in jordan is Dinar",
+    #     "contexts": [
+    #         "Japan is an island country in East Asia.",
+    #         "The official currency of Japan is the Japanese is yen",
+    #     ]
+    # },
+]
+
+from utils import get_mixtral_llm
+model = get_mixtral_llm(temp=0.1)
+
+
+scores = compute_faithfulness(dataset, model)
+
+for i, score in enumerate(scores):
+    print(f"{i+1}: Faithfulness Score = {score}")
